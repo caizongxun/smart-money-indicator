@@ -1,0 +1,362 @@
+//@version=5
+indicator('Smart Money Concepts [Complete]', 'SMC Complete', overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+
+// ============================================================================
+// COLORS - Professional Trading Chart Theme
+// ============================================================================
+
+// Primary Structure Colors
+COLOR_BULLISH         = color.new(#089981, 0)
+COLOR_BEARISH         = color.new(#f23645, 0)
+COLOR_ACCENT          = color.new(#2fb5e6, 0)
+COLOR_GRAY            = color.new(#878b94, 0)
+
+// Order Block Colors
+COLOR_OB_BULL_FILL    = color.new(#1848cc, 75)
+COLOR_OB_BULL_BORDER  = color.new(#1848cc, 0)
+COLOR_OB_BEAR_FILL    = color.new(#b22833, 75)
+COLOR_OB_BEAR_BORDER  = color.new(#b22833, 0)
+
+COLOR_OB_INT_BULL     = color.new(#089981, 75)
+COLOR_OB_INT_BEAR     = color.new(#f23645, 75)
+
+// Fair Value Gap Colors
+COLOR_FVG_BULL        = color.new(#1848cc, 70)
+COLOR_FVG_BEAR        = color.new(#b22833, 70)
+
+// Zone Colors
+COLOR_PREMIUM_ZONE    = color.new(#f23645, 30)
+COLOR_DISCOUNT_ZONE   = color.new(#089981, 30)
+COLOR_EQUILIBRIUM     = color.new(#878b94, 20)
+
+// Monochrome
+COLOR_MONO_BULL       = color.new(#b2b5be, 0)
+COLOR_MONO_BEAR       = color.new(#5d606b, 0)
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+BULLISH               = +1
+BEARISH               = -1
+
+LEG_BULLISH           = 1
+LEG_BEARISH           = 0
+
+MODE_ALL              = 'All'
+MODE_BOS              = 'BOS'
+MODE_CHOCH            = 'CHoCH'
+
+STYLE_COLORED         = 'Colored'
+STYLE_MONO            = 'Monochrome'
+
+LINE_SOLID            = 'Solid'
+LINE_DASHED           = 'Dashed'
+LINE_DOTTED           = 'Dotted'
+
+FILTER_ATR            = 'Atr'
+FILTER_RANGE          = 'Cumulative Mean Range'
+
+SOURCE_CLOSE          = 'Close'
+SOURCE_HIGHLOW        = 'High/Low'
+
+// ============================================================================
+// INPUT SETTINGS
+// ============================================================================
+
+group_swing           = 'SWING STRUCTURE'
+group_internal        = 'INTERNAL STRUCTURE'
+group_ob              = 'ORDER BLOCKS'
+group_fvg             = 'FAIR VALUE GAPS'
+group_zones           = 'PREMIUM/DISCOUNT ZONES'
+group_style           = 'STYLE & THEME'
+
+// --- Mode & Style ---
+modeInput             = input.string(MODE_ALL, 'Structure Filter', group=group_style, options=[MODE_ALL, MODE_BOS, MODE_CHOCH])
+themeInput            = input.string(STYLE_COLORED, 'Color Theme', group=group_style, options=[STYLE_COLORED, STYLE_MONO])
+modeDisplayInput      = input.string('Historical', 'Display Mode', group=group_style, options=['Historical', 'Present'])
+
+// --- Swing Structure ---
+swingLengthInput      = input.int(50, 'Swing Length', minval=5, group=group_swing, inline='swing1')
+showSwingInput        = input(true, 'Show Swing Structure', group=group_swing, inline='swing1')
+swingBullColorInput   = input(COLOR_BULLISH, 'Bullish', group=group_swing, inline='swing2')
+swingBearColorInput   = input(COLOR_BEARISH, 'Bearish', group=group_swing, inline='swing2')
+showPivotsInput       = input(false, 'Show Pivot Points', group=group_swing)
+
+// --- Internal Structure ---
+showInternalInput     = input(true, 'Show Internal Structure', group=group_internal, inline='int1')
+internalBullColorInput = input(COLOR_BULLISH, 'Bullish', group=group_internal, inline='int2')
+internalBearColorInput = input(COLOR_BEARISH, 'Bearish', group=group_internal, inline='int2')
+internalFilterInput   = input(false, 'Confluence Filter', group=group_internal)
+
+// --- Order Blocks ---
+showOBInput           = input(true, 'Display Order Blocks', group=group_ob, inline='ob1')
+obCountInput          = input.int(8, '', minval=1, maxval=20, group=group_ob, inline='ob1')
+obFilterInput         = input.string(FILTER_ATR, 'Filter Method', group=group_ob, options=[FILTER_ATR, FILTER_RANGE])
+obMitigationInput     = input.string(SOURCE_HIGHLOW, 'Mitigation Source', group=group_ob, options=[SOURCE_CLOSE, SOURCE_HIGHLOW])
+obBullColorInput      = input(COLOR_OB_BULL_FILL, 'Bullish Fill', group=group_ob, inline='obcol')
+obBearColorInput      = input(COLOR_OB_BEAR_FILL, 'Bearish Fill', group=group_ob, inline='obcol')
+
+// --- Fair Value Gaps ---
+showFVGInput          = input(false, 'Fair Value Gaps', group=group_fvg, inline='fvg1')
+fvgAutoThresholdInput = input(true, 'Auto Threshold', group=group_fvg, inline='fvg1')
+fvgBullColorInput     = input(COLOR_FVG_BULL, 'Bullish', group=group_fvg, inline='fvgcol')
+fvgBearColorInput     = input(COLOR_FVG_BEAR, 'Bearish', group=group_fvg, inline='fvgcol')
+fvgExtendInput        = input.int(1, 'Extend Bars', minval=0, group=group_fvg)
+
+// --- Premium/Discount Zones ---
+showPDZonesInput      = input(false, 'Premium/Discount Zones', group=group_zones)
+pdZoneHeightInput     = input.int(200, 'Zone Height (bars)', minval=10, group=group_zones)
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
+
+type Pivot
+    float level
+    float lastLevel
+    int barTime
+    int barIndex
+    bool crossed
+
+type OrderBlock
+    float high
+    float low
+    int barTime
+    int bias
+    box boxDisplay
+
+type SwingExtreme
+    float top
+    float bottom
+    int topTime
+    int bottomTime
+    int topIndex
+    int bottomIndex
+
+// ============================================================================
+// GLOBAL VARIABLES
+// ============================================================================
+
+var Pivot swingHigh               = Pivot.new(na, na, na, na, false)
+var Pivot swingLow                = Pivot.new(na, na, na, na, false)
+var Pivot internalHigh            = Pivot.new(na, na, na, na, false)
+var Pivot internalLow             = Pivot.new(na, na, na, na, false)
+
+var int swingTrend                = 0
+var int internalTrend             = 0
+
+var array<OrderBlock> swingOBs    = array.new<OrderBlock>()
+var array<OrderBlock> internalOBs = array.new<OrderBlock>()
+
+var array<float> parsedHighs      = array.new<float>()
+var array<float> parsedLows       = array.new<float>()
+var array<float> rawHighs         = array.new<float>()
+var array<float> rawLows          = array.new<float>()
+var array<int> barTimes           = array.new<int>()
+
+var SwingExtreme swingExtremes    = SwingExtreme.new(na, na, na, na, na, na)
+
+// ============================================================================
+// VOLATILITY MEASUREMENT
+// ============================================================================
+
+volatilityMeasure = obFilterInput == FILTER_ATR ? ta.atr(200) : ta.cum(ta.tr) / bar_index
+isHighVolBar      = (high - low) >= (2 * volatilityMeasure)
+parsedHigh        = isHighVolBar ? low : high
+parsedLow         = isHighVolBar ? high : low
+
+// Store all values
+rawHighs.push(high)
+rawLows.push(low)
+parsedHighs.push(parsedHigh)
+parsedLows.push(parsedLow)
+barTimes.push(time)
+
+// ============================================================================
+// LEG DETECTION FUNCTION
+// ============================================================================
+
+f_getLeg(int length) =>
+    var int leg = 0
+    newHigh = high[length] > ta.highest(high, length)
+    newLow = low[length] < ta.lowest(low, length)
+    
+    if newHigh
+        leg := LEG_BEARISH
+    else if newLow
+        leg := LEG_BULLISH
+    leg
+
+// ============================================================================
+// PIVOT UPDATE FUNCTION
+// ============================================================================
+
+f_updatePivots(int length) =>
+    currentLeg = f_getLeg(length)
+    newLeg = ta.change(currentLeg) != 0
+    
+    if newLeg
+        if ta.change(currentLeg) == +1
+            // Bullish leg start -> new swing low formed
+            swingLow.lastLevel = swingLow.level
+            swingLow.level = low[length]
+            swingLow.barTime = time[length]
+            swingLow.barIndex = bar_index[length]
+            swingLow.crossed = false
+            swingTrend := BULLISH
+        else
+            // Bearish leg start -> new swing high formed
+            swingHigh.lastLevel = swingHigh.level
+            swingHigh.level = high[length]
+            swingHigh.barTime = time[length]
+            swingHigh.barIndex = bar_index[length]
+            swingHigh.crossed = false
+            swingTrend := BEARISH
+
+// ============================================================================
+// STRUCTURE DRAWING FUNCTION
+// ============================================================================
+
+f_drawStructure(Pivot pvt, string label, color lineColor, bool isInternal) =>
+    lineStyle = isInternal ? line.style_dashed : line.style_solid
+    lineWidth = isInternal ? 2 : 3
+    
+    l = line.new(
+         chart.point.new(pvt.barTime, na, pvt.level),
+         chart.point.new(time, na, pvt.level),
+         xloc=xloc.bar_time,
+         color=lineColor,
+         width=lineWidth,
+         style=lineStyle
+    )
+    
+    labelMidIndex = math.round(0.5 * (pvt.barIndex + bar_index))
+    lbl = label.new(
+         chart.point.new(na, labelMidIndex, pvt.level),
+         label,
+         xloc=xloc.bar_index,
+         color=color(na),
+         textcolor=lineColor,
+         style=label.style_label_center,
+         size=size.small,
+         textalign=text.align_center
+    )
+
+// ============================================================================
+// ORDER BLOCK STORAGE & DRAWING
+// ============================================================================
+
+f_storeOrderBlock(Pivot pvt, int bias, bool isInternal) =>
+    array<OrderBlock> obArray = isInternal ? internalOBs : swingOBs
+    
+    if bias == BEARISH
+        upperRange = parsedHighs.slice(pvt.barIndex, bar_index)
+        maxIdx = pvt.barIndex + upperRange.indexof(upperRange.max())
+        obHigh = parsedHighs.get(maxIdx)
+        obLow = parsedLows.get(maxIdx)
+    else
+        lowerRange = parsedLows.slice(pvt.barIndex, bar_index)
+        minIdx = pvt.barIndex + lowerRange.indexof(lowerRange.min())
+        obHigh = parsedHighs.get(minIdx)
+        obLow = parsedLows.get(minIdx)
+        maxIdx = minIdx
+    
+    ob = OrderBlock.new(obHigh, obLow, barTimes.get(maxIdx), bias, na)
+    obArray.unshift(ob)
+    
+    if obArray.size() > 100
+        obArray.pop()
+
+f_drawOrderBlocks(bool isInternal) =>
+    obArray = isInternal ? internalOBs : swingOBs
+    maxDisplay = math.min(obCountInput, obArray.size())
+    
+    if not showOBInput or maxDisplay == 0
+        return
+    
+    for i = 0 to maxDisplay - 1
+        ob = obArray.get(i)
+        if na(ob.high) or na(ob.low)
+            continue
+        
+        if ob.bias == BEARISH
+            fillColor = isInternal ? COLOR_OB_INT_BEAR : COLOR_OB_BEAR_FILL
+            borderColor = COLOR_OB_BEAR_BORDER
+        else
+            fillColor = isInternal ? COLOR_OB_INT_BULL : COLOR_OB_BULL_FILL
+            borderColor = COLOR_OB_BULL_BORDER
+        
+        box b = box.new(
+             chart.point.new(ob.barTime, na, ob.high),
+             chart.point.new(time, na, ob.low),
+             xloc=xloc.bar_time,
+             border_color=borderColor,
+             border_width=2,
+             bgcolor=fillColor,
+             extend=extend.right
+        )
+        ob.boxDisplay := b
+
+f_deleteOrderBlocks(bool isInternal) =>
+    obArray = isInternal ? internalOBs : swingOBs
+    
+    for i = obArray.size() - 1 to 0 by -1
+        ob = obArray.get(i)
+        source = obMitigationInput == SOURCE_CLOSE ? close : (ob.bias == BEARISH ? high : low)
+        
+        if (ob.bias == BEARISH and source > ob.high) or (ob.bias == BULLISH and source < ob.low)
+            if not na(ob.boxDisplay)
+                ob.boxDisplay.delete()
+            obArray.remove(i)
+
+// ============================================================================
+// STRUCTURE DETECTION
+// ============================================================================
+
+f_detectStructures() =>
+    // Bullish breakout - price closes above swing high
+    if showSwingInput and swingTrend == BEARISH
+        if ta.crossover(close, swingHigh.level) and not swingHigh.crossed
+            swingHigh.crossed := true
+            
+            tag = (showPivotsInput and swingHigh.lastLevel < swingHigh.level) ? 'HH' : 'BOS'
+            if modeInput == MODE_ALL or (modeInput == MODE_BOS and tag == 'BOS')
+                bullishColor = themeInput == STYLE_MONO ? COLOR_MONO_BULL : swingBullColorInput
+                f_drawStructure(swingHigh, tag, bullishColor, false)
+            
+            if showOBInput
+                f_storeOrderBlock(swingHigh, BULLISH, false)
+    
+    // Bearish breakout - price closes below swing low
+    if showSwingInput and swingTrend == BULLISH
+        if ta.crossunder(close, swingLow.level) and not swingLow.crossed
+            swingLow.crossed := true
+            
+            tag = (showPivotsInput and swingLow.lastLevel > swingLow.level) ? 'LL' : 'BOS'
+            if modeInput == MODE_ALL or (modeInput == MODE_BOS and tag == 'BOS')
+                bearishColor = themeInput == STYLE_MONO ? COLOR_MONO_BEAR : swingBearColorInput
+                f_drawStructure(swingLow, tag, bearishColor, false)
+            
+            if showOBInput
+                f_storeOrderBlock(swingLow, BEARISH, false)
+
+// ============================================================================
+// MAIN EXECUTION
+// ============================================================================
+
+f_updatePivots(swingLengthInput)
+f_detectStructures()
+f_drawOrderBlocks(false)
+f_drawOrderBlocks(true)
+f_deleteOrderBlocks(false)
+f_deleteOrderBlocks(true)
+
+// Plot reference lines for current pivot levels
+if showPivotsInput and not na(swingHigh.level)
+    plot(swingHigh.level, 'Swing High Reference', COLOR_BEARISH, linewidth=1, style=plot.style_linebr)
+
+if showPivotsInput and not na(swingLow.level)
+    plot(swingLow.level, 'Swing Low Reference', COLOR_BULLISH, linewidth=1, style=plot.style_linebr)
+
+alert("Swing Structure Updated", alert.freq_once_per_bar)
