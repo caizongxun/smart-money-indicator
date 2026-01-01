@@ -1,0 +1,292 @@
+//@version=5
+indicator('Smart Money Concepts [Enhanced]', 'SMC Enhanced', overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+
+// ========================================
+// COLOR SCHEME - Professional TradingView Style
+// ========================================
+GREEN_BULLISH    = color.new(#089981, 0)      // Bullish structure - solid green
+RED_BEARISH      = color.new(#f23645, 0)      // Bearish structure - solid red
+CYAN_ACCENT      = color.new(#2fb5e6, 0)      // Accents - cyan blue
+BLUE_OB_BULL     = color.new(#1848cc, 75)     // Bullish order block - transparent blue
+RED_OB_BEAR      = color.new(#b22833, 75)     // Bearish order block - transparent red
+GREEN_OB_BULL    = color.new(#089981, 75)     // Internal bullish OB - transparent green
+RED_OB_BEAR      = color.new(#f23645, 75)     // Internal bearish OB - transparent red
+BLUE_FVG_BULL    = color.new(#1848cc, 70)     // FVG bullish - light blue
+RED_FVG_BEAR     = color.new(#b22833, 70)     // FVG bearish - light red
+GRAY_NEUTRAL     = color.new(#878b94, 50)     // Neutral zones
+
+// ========================================
+// CONSTANTS
+// ========================================
+BULLISH_LEG      = 1
+BEARISH_LEG      = 0
+
+BULLISH          = +1
+BEARISH          = -1
+
+MODE_HISTORICAL  = 'Historical'
+MODE_PRESENT     = 'Present'
+
+STYLE_COLORED    = 'Colored'
+STYLE_MONO       = 'Monochrome'
+
+TYPE_ALL         = 'All'
+TYPE_BOS         = 'BOS'
+TYPE_CHOCH       = 'CHoCH'
+
+SIZE_TINY        = size.tiny
+SIZE_SMALL       = size.small
+SIZE_NORMAL      = size.normal
+
+FILTER_ATR       = 'Atr'
+FILTER_RANGE     = 'Cumulative Mean Range'
+
+SOURCE_CLOSE     = 'Close'
+SOURCE_HIGHLOW   = 'High/Low'
+
+LINE_SOLID       = 'Solid'
+LINE_DASHED      = 'Dashed'
+LINE_DOTTED      = 'Dotted'
+
+// ========================================
+// INPUT SETTINGS
+// ========================================
+swingLengthInput           = input.int(50, 'Swing Detection Length', minval=5)
+showStructureInput         = input(true, 'Show Swing Structure')
+showInternalsInput         = input(true, 'Show Internal Structure')
+showOrderBlocksInput       = input(true, 'Show Order Blocks', inline='ob')
+orderBlocksDisplayInput    = input.int(8, '', minval=1, maxval=20, inline='ob')
+orderBlockFilterInput      = input.string(FILTER_ATR, 'Order Block Filter', options=[FILTER_ATR, FILTER_RANGE])
+orderBlockMitigationInput  = input.string(SOURCE_HIGHLOW, 'Mitigation Source', options=[SOURCE_CLOSE, SOURCE_HIGHLOW])
+showFairValueGapsInput     = input(false, 'Show Fair Value Gaps')
+showEqualHighLowInput      = input(false, 'Show Equal High/Low')
+modeInput                  = input.string(MODE_HISTORICAL, 'Display Mode', options=[MODE_HISTORICAL, MODE_PRESENT])
+colorStyleInput            = input.string(STYLE_COLORED, 'Color Style', options=[STYLE_COLORED, STYLE_MONO])
+
+// ========================================
+// DATA STRUCTURES
+// ========================================
+type Pivot
+    float level
+    int barTime
+    int barIndex
+    bool crossed
+    float lastLevel
+
+type OrderBlock
+    float high
+    float low
+    int barTime
+    int bias
+    box boxDisplay
+
+type FairValueGap
+    float top
+    float bottom
+    int bias
+    box topBox
+    box midBox
+    box botBox
+
+// ========================================
+// GLOBAL VARIABLES
+// ========================================
+var Pivot swingHigh           = Pivot.new(na, na, na, false, na)
+var Pivot swingLow            = Pivot.new(na, na, na, false, na)
+var Pivot internalHigh        = Pivot.new(na, na, na, false, na)
+var Pivot internalLow         = Pivot.new(na, na, na, false, na)
+
+var array<OrderBlock> orderBlocks = array.new<OrderBlock>()
+var array<FairValueGap> fvgArray = array.new<FairValueGap>()
+
+var int swingTrend            = 0
+var int internalTrend         = 0
+
+var array<float> highs        = array.new<float>()
+var array<float> lows         = array.new<float>()
+var array<int> times          = array.new<int>()
+
+// Store parsed values for OB calculation
+var array<float> parsedHighs  = array.new<float>()
+var array<float> parsedLows   = array.new<float>()
+
+// Volatility measurement
+volatilityMeasure = orderBlockFilterInput == FILTER_ATR ? ta.atr(200) : ta.cum(ta.tr) / bar_index
+isHighVolBar      = (high - low) >= (2 * volatilityMeasure)
+parsedHigh        = isHighVolBar ? low : high
+parsedLow         = isHighVolBar ? high : low
+
+// Store values
+highs.push(high)
+lows.push(low)
+times.push(time)
+parsedHighs.push(parsedHigh)
+parsedLows.push(parsedLow)
+
+// ========================================
+// UTILITY FUNCTIONS
+// ========================================
+
+// Detect current leg direction
+f_getLeg(int length) =>
+    var int leg = 0
+    newHigh = high[length] > ta.highest(high, length)
+    newLow = low[length] < ta.lowest(low, length)
+    
+    if newHigh
+        leg := BEARISH_LEG
+    else if newLow
+        leg := BULLISH_LEG
+    leg
+
+// Check for leg change
+f_isNewLeg(int leg) => ta.change(leg) != 0
+f_isBullishLeg(int leg) => ta.change(leg) == +1
+f_isBearishLeg(int leg) => ta.change(leg) == -1
+
+// Draw structure line
+f_drawStructure(Pivot pvt, string label, color lineColor, bool isInternal) =>
+    lineStyle = isInternal ? line.style_dashed : line.style_solid
+    lineWidth = isInternal ? 2 : 3
+    
+    l = line.new(
+         chart.point.new(pvt.barTime, na, pvt.level),
+         chart.point.new(time, na, pvt.level),
+         xloc=xloc.bar_time,
+         color=lineColor,
+         width=lineWidth,
+         style=lineStyle
+    )
+    
+    labelPos = math.round(0.5 * (pvt.barIndex + bar_index))
+    lbl = label.new(
+         chart.point.new(na, labelPos, pvt.level),
+         label,
+         xloc=xloc.bar_index,
+         color=color(na),
+         textcolor=lineColor,
+         style=label.style_label_down,
+         size=SIZE_SMALL,
+         textalign=text.align_center
+    )
+
+// Draw order block box with border
+f_drawOrderBlock(OrderBlock ob, color fillColor, color borderColor) =>
+    b = box.new(
+         chart.point.new(ob.barTime, na, ob.high),
+         chart.point.new(time, na, ob.low),
+         xloc=xloc.bar_time,
+         border_color=borderColor,
+         border_width=2,
+         bgcolor=fillColor,
+         extend=extend.right
+    )
+    b
+
+// Detect and update pivot points
+f_updatePivots() =>
+    currentLeg = f_getLeg(swingLengthInput)
+    
+    if f_isNewLeg(currentLeg)
+        if f_isBullishLeg(currentLeg)
+            // New bullish pivot (swing low)
+            swingLow.lastLevel = swingLow.level
+            swingLow.level = low[swingLengthInput]
+            swingLow.barTime = time[swingLengthInput]
+            swingLow.barIndex = bar_index[swingLengthInput]
+            swingLow.crossed = false
+            swingTrend := BULLISH
+        else
+            // New bearish pivot (swing high)
+            swingHigh.lastLevel = swingHigh.level
+            swingHigh.level = high[swingLengthInput]
+            swingHigh.barTime = time[swingLengthInput]
+            swingHigh.barIndex = bar_index[swingLengthInput]
+            swingHigh.crossed = false
+            swingTrend := BEARISH
+
+// Detect structure breaks and draw
+f_detectStructure() =>
+    // Bullish structure (crossing above swing high pivot)
+    if showStructureInput and swingTrend == BEARISH
+        if ta.crossover(close, swingHigh.level) and not swingHigh.crossed
+            swingHigh.crossed := true
+            
+            // Determine if CHoCH or BOS
+            tag = swingTrend == BULLISH ? 'CHoCH' : 'BOS'
+            f_drawStructure(swingHigh, tag, GREEN_BULLISH, false)
+            
+            // Store order block
+            if showOrderBlocksInput
+                f_storeOrderBlock(swingHigh, BULLISH)
+    
+    // Bearish structure (crossing below swing low pivot)
+    if showStructureInput and swingTrend == BULLISH
+        if ta.crossunder(close, swingLow.level) and not swingLow.crossed
+            swingLow.crossed := true
+            
+            tag = swingTrend == BEARISH ? 'CHoCH' : 'BOS'
+            f_drawStructure(swingLow, tag, RED_BEARISH, false)
+            
+            if showOrderBlocksInput
+                f_storeOrderBlock(swingLow, BEARISH)
+
+// Store order block
+f_storeOrderBlock(Pivot pvt, int bias) =>
+    if bias == BEARISH
+        // Find highest point in range
+        upperRange = parsedHighs.slice(pvt.barIndex, bar_index)
+        maxIdx = pvt.barIndex + upperRange.indexof(upperRange.max())
+        obHigh = parsedHighs.get(maxIdx)
+        obLow = parsedLows.get(maxIdx)
+    else
+        // Find lowest point in range
+        lowerRange = parsedLows.slice(pvt.barIndex, bar_index)
+        minIdx = pvt.barIndex + lowerRange.indexof(lowerRange.min())
+        obHigh = parsedHighs.get(minIdx)
+        obLow = parsedLows.get(minIdx)
+    
+    ob = OrderBlock.new(obHigh, obLow, times.get(minIdx if bias == BULLISH else maxIdx), bias, na)
+    orderBlocks.unshift(ob)
+    
+    if orderBlocks.size() > 100
+        orderBlocks.pop()
+
+// Draw stored order blocks
+f_drawOrderBlocks() =>
+    if showOrderBlocksInput
+        displayLimit = math.min(orderBlocksDisplayInput, orderBlocks.size())
+        
+        for i = 0 to displayLimit - 1
+            ob = orderBlocks.get(i)
+            if not na(ob.high) and not na(ob.low)
+                fillColor = ob.bias == BEARISH ? RED_OB_BEAR : BLUE_OB_BULL
+                borderColor = ob.bias == BEARISH ? color.new(#b22833, 0) : color.new(#1848cc, 0)
+                
+                ob.boxDisplay := f_drawOrderBlock(ob, fillColor, borderColor)
+
+// Manage order block deletion (mitigation)
+f_deleteOrderBlocks() =>
+    if orderBlocks.size() > 0
+        for i = orderBlocks.size() - 1 to 0 by -1
+            ob = orderBlocks.get(i)
+            source = orderBlockMitigationInput == SOURCE_CLOSE ? close : (ob.bias == BEARISH ? high : low)
+            
+            if (ob.bias == BEARISH and source > ob.high) or (ob.bias == BULLISH and source < ob.low)
+                if not na(ob.boxDisplay)
+                    ob.boxDisplay.delete()
+                orderBlocks.remove(i)
+
+// ========================================
+// MAIN EXECUTION
+// ========================================
+
+f_updatePivots()
+f_detectStructure()
+f_drawOrderBlocks()
+f_deleteOrderBlocks()
+
+// Plot current structure lines for reference
+if showStructureInput
+    plot(swingHigh.level, 'Swing High', GREEN_BULLISH, linewidth=2, style=plot.style_linebr)
+    plot(swingLow.level, 'Swing Low', RED_BEARISH, linewidth=2, style=plot.style_linebr)
